@@ -1,0 +1,78 @@
+#include "BLEDevice.h"
+
+// Dirección MAC exacta de tu captura de pantalla
+static BLEAddress bmsAddress("AA:BB:CC:B2:23:45");
+// Servicio listado en tu imagen
+static BLEUUID serviceUUID("0000FFE0-0000-1000-8000-00805F9B34FB"); 
+// Característica estándar de transmisión/recepción para estos módulos
+static BLEUUID charUUID("0000FFE1-0000-1000-8000-00805F9B34FB");    
+
+static boolean connected = false;
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+
+// Petición del Viejo Protocolo
+uint8_t peticion[6] = {0x5A, 0x5A, 0x00, 0x00, 0x00, 0x00};
+
+// Esta función se activa automáticamente cuando el BMS nos envía la trama
+static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  Serial.print("Trama recibida (");
+  Serial.print(length);
+  Serial.print(" bytes): ");
+  for (int i = 0; i < length; i++) {
+    if (pData[i] < 0x10) Serial.print("0");
+    Serial.print(pData[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println();
+}
+
+bool connectToBMS() {
+  Serial.println("Conectando al BMS...");
+  BLEClient* pClient = BLEDevice::createClient();
+  
+  if (!pClient->connect(bmsAddress)) {
+    Serial.println("Fallo al conectar. Reintentando en breve...");
+    return false;
+  }
+  
+  BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
+  if (pRemoteService == nullptr) {
+    Serial.println("No se encontró el servicio FFE0.");
+    pClient->disconnect();
+    return false;
+  }
+
+  pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+  if (pRemoteCharacteristic == nullptr) {
+    Serial.println("No se encontró la característica FFE1.");
+    pClient->disconnect();
+    return false;
+  }
+
+  if(pRemoteCharacteristic->canNotify()) {
+    pRemoteCharacteristic->registerForNotify(notifyCallback);
+    Serial.println("Conectado y notificaciones activadas. Listo para leer.");
+  }
+
+  connected = true;
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Iniciando Cliente BLE ESP32...");
+  BLEDevice::init(""); // Inicializamos el Bluetooth del ESP32
+  connectToBMS();
+}
+
+void loop() {
+  if (connected) {
+    // Inyectar la petición al BMS
+    pRemoteCharacteristic->writeValue(peticion, sizeof(peticion));
+    delay(3000); // Esperar 3 segundos
+  } else {
+    // Si se pierde la conexión, intentar reconectar
+    connectToBMS();
+    delay(5000);
+  }
+}
