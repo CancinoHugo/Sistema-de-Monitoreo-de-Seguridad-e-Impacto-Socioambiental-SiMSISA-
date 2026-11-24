@@ -1,0 +1,123 @@
+#include "BLEDevice.h"
+
+static BLEAddress bmsAddress("AA:BB:CC:B2:23:45");
+static BLEUUID serviceUUID("0000FFE0-0000-1000-8000-00805F9B34FB");
+static BLEUUID charUUID("0000FFE1-0000-1000-8000-00805F9B34FB");
+
+static boolean connected = false;
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+
+uint8_t peticion[6] = {0x5A, 0x5A, 0x00, 0x00, 0x00, 0x00};
+
+// Buffer para juntar los 7 paquetes de 20 bytes = 140 bytes
+uint8_t trama[140];
+int indice = 0;
+bool tramaLista = false;
+
+void decodificarTrama() {
+  // 1. Voltaje total (bytes 4 y 5, escala 0.1V)
+  uint16_t rawVoltaje = (trama[4] << 8) | trama[5];
+  float voltajeTotal = rawVoltaje * 0.1;
+
+  // 2. Corriente (bytes 70 a 73, entero con signo de 32 bits, escala 0.1A)
+  int32_t rawCorriente = ((int32_t)trama[70] << 24) | ((int32_t)trama[71] << 16) |
+                         ((int32_t)trama[72] << 8)  | trama[73];
+  float corriente = rawCorriente * 0.1;
+
+  // 3. Porcentaje de batería SOC (byte 74)
+  uint8_t soc = trama[74];
+
+  // 4. Temperaturas (bytes 92-93 y 94-95)
+  int16_t temp1 = (trama[92] << 8) | trama[93];
+  int16_t temp2 = (trama[94] << 8) | trama[95];
+
+  // 5. Número de celdas configuradas (byte 123)
+  uint8_t numCeldas = trama[123];
+  if (numCeldas > 32) numCeldas = 20; // Seguridad
+
+  Serial.println("==========================================");
+  Serial.printf("Voltaje Total: %.1f V | SOC: %d %% | Corriente: %.1f A\n", voltajeTotal, soc, corriente);
+  Serial.printf("Temperaturas:  T1 = %d C | T2 = %d C\n", temp1, temp2);
+  Serial.printf("Celdas (%d):\n", numCeldas);
+
+  for (int i = 0; i < numCeldas; i++) {
+    int pos = 6 + (i * 2);
+    uint16_t rawCelda = (trama[pos] << 8) | trama[pos + 1];
+    float voltajeCelda = rawCelda * 0.001;
+    Serial.printf("  C%02d: %.3f V", i + 1, voltajeCelda);
+    if ((i + 1) % 4 == 0 || i == numCeldas - 1) Serial.println();
+  }
+  Serial.println("==========================================");
+}
+
+static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  // Si detectamos la cabecera AA 55 AA FF, reiniciamos el contador de la trama
+  if (length >= 4 && pData[0] == 0xAA && pData[1] == 0x55 && pData[2] == 0xAA && pData[3] == 0xFF) {
+    indice = 0;
+  }
+
+  // Copiamos el bloque de 20 bytes al buffer principal
+  for (size_t i = 0; i < length; i++) {
+    if (indice < 140) {
+      trama[indice++] = pData[i];
+    }
+  }
+
+  // Cuando completamos los 140 bytes, avisamos al loop() para imprimir
+  if (indice == 140) {
+    tramaLista = true;
+    indice = 0;
+  }
+}
+
+bool connectToBMS() {
+  Serial.println("Conectando al BMS...");
+  BLEClient* pClient = BLEDevice::createClient();
+  
+  if (!pClient->connect(bmsAddress)) {
+    Serial.println("Fallo al conectar. Reintentando...");
+    return false;
+  }
+  
+  BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
+  if (pRemoteService == nullptr) {
+    pClient->disconnect();
+    return false;
+  }
+
+  pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+  if (pRemoteCharacteristic == nullptr) {
+    pClient->disconnect();
+    return false;
+  }
+
+  if (pRemoteCharacteristic->canNotify()) {
+    pRemoteCharacteristic->registerForNotify(notifyCallback);
+    Serial.println("Conectado y recibiendo telemetría...");
+  }
+
+  connected = true;
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  BLEDevice::init("");
+  connectToBMS();
+}
+
+void loop() {
+  if (tramaLista) {
+    tramaLista = false;
+    decodificarTrama();
+  }
+
+  static unsigned long ultimaPeticion = 0;
+  if (connected && millis() - ultimaPeticion >= 3000) {
+    ultimaPeticion = millis();
+    pRemoteCharacteristic->writeValue(peticion, sizeof(peticion));
+  } else if (!connected) {
+    connectToBMS();
+    delay(5000);
+  }
+}
